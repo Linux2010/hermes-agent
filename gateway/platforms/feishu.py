@@ -66,6 +66,8 @@ try:
         GetMessageRequest,
         GetMessageResourceRequest,
         P2ImMessageMessageReadV1,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         ReplyMessageRequest,
         ReplyMessageRequestBody,
         UpdateMessageRequest,
@@ -1890,7 +1892,14 @@ class FeishuAdapter(BasePlatformAdapter):
         future.add_done_callback(self._log_background_failure)
 
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
-        """Schedule approval resolution and build the synchronous callback response."""
+        """Schedule approval resolution and build the synchronous callback response.
+        
+        For interactive cards, we need to use PATCH API instead of the SDK's
+        default PUT handling. P2CardActionTriggerResponse's card update uses
+        PUT internally, which fails for interactive cards (error 200340).
+        
+        We return an empty response and manually PATCH the card afterwards.
+        """
         approval_id = action_value.get("approval_id")
         if approval_id is None:
             logger.debug("[Feishu] Card action missing approval_id, ignoring")
@@ -1901,17 +1910,24 @@ class FeishuAdapter(BasePlatformAdapter):
         open_id = str(getattr(operator, "open_id", "") or "")
         user_name = self._get_cached_sender_name(open_id) or open_id
 
+        # Get message_id from event for manual PATCH
+        message = getattr(event, "message", None)
+        message_id = str(getattr(message, "message_id", "") or "")
+
+        # Build updated card content
+        card_content = self._build_resolved_approval_card(choice=choice, user_name=user_name)
+        import json
+        card_json = json.dumps(card_content)
+
+        # Schedule async PATCH update (more reliable than SDK response)
+        if message_id:
+            self._submit_on_loop(loop, self._patch_approval_card(message_id, card_json))
+
+        # Resolve approval state
         self._submit_on_loop(loop, self._resolve_approval(approval_id, choice, user_name))
 
-        if P2CardActionTriggerResponse is None:
-            return None
-        response = P2CardActionTriggerResponse()
-        if CallBackCard is not None:
-            card = CallBackCard()
-            card.type = "raw"
-            card.data = self._build_resolved_approval_card(choice=choice, user_name=user_name)
-            response.card = card
-        return response
+        # Return empty response (we handle update via PATCH API)
+        return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
     async def _resolve_approval(self, approval_id: Any, choice: str, user_name: str) -> None:
         """Pop approval state and unblock the waiting agent thread."""
@@ -1928,6 +1944,27 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
+
+    async def _patch_approval_card(self, message_id: str, card_json: str) -> None:
+        """Update an approval card using PATCH API.
+        
+        PATCH API supports updating interactive message cards, while PUT API
+        (message.update) does not. This is called after approval button click
+        to update the card UI without triggering error 200340.
+        """
+        if not self._client or not message_id:
+            return
+        
+        try:
+            body = self._build_patch_message_body(content=card_json)
+            request = self._build_patch_message_request(message_id=message_id, request_body=body)
+            response = await asyncio.to_thread(self._client.im.v1.message.patch, request)
+            if not response or not getattr(response, "success", lambda: False)():
+                logger.warning("[Feishu] Failed to PATCH approval card: %s", message_id)
+            else:
+                logger.debug("[Feishu] Successfully PATCHed approval card: %s", message_id)
+        except Exception as exc:
+            logger.warning("[Feishu] Exception PATCHing approval card %s: %s", message_id, exc)
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
         """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""
@@ -3563,6 +3600,28 @@ class FeishuAdapter(BasePlatformAdapter):
                 .request_body(request_body)
                 .build()
             )
+        return SimpleNamespace(message_id=message_id, request_body=request_body)
+
+    @staticmethod
+    def _build_patch_message_body(*, content: str) -> Any:
+        """Build request body for PATCH message API (used for interactive cards).
+        
+        Unlike PUT (update), PATCH only requires content, not msg_type.
+        Used to update interactive message cards without changing message type.
+        """
+        if "PatchMessageRequestBody" in globals():
+            return PatchMessageRequestBody.builder().content(content).build()
+        return SimpleNamespace(content=content)
+
+    @staticmethod
+    def _build_patch_message_request(message_id: str, request_body: Any) -> Any:
+        """Build request for PATCH message API (used for interactive cards).
+        
+        PATCH API supports updating interactive cards, while PUT (update) API
+        does not. Use this for updating cards after approval button clicks.
+        """
+        if "PatchMessageRequest" in globals():
+            return PatchMessageRequest.builder().message_id(message_id).request_body(request_body).build()
         return SimpleNamespace(message_id=message_id, request_body=request_body)
 
     @staticmethod
