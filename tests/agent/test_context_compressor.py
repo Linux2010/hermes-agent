@@ -781,3 +781,79 @@ class TestTokenBudgetTailProtection:
         # Tool at index 2 is outside the protected tail (last 3 = indices 2,3,4)
         # so it might or might not be pruned depending on boundary
         assert isinstance(pruned, int)
+
+
+class TestTruncateToolCallArgsJson:
+    """Tests for _truncate_tool_call_args_json — fix for issue #12643.
+
+    The bug: raw string slicing on tool call arguments JSON could create
+    invalid JSON with unterminated strings, causing downstream providers
+    (vllm, MiniMax, etc.) to return 400 errors.
+    """
+
+    def test_short_args_unchanged(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        args = '{"path": "file.txt"}'
+        result = _truncate_tool_call_args_json(args, head_chars=200)
+        assert result == args
+
+    def test_long_string_value_truncated(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        # Create args with a long string value that would be truncated
+        long_content = "a" * 500
+        args = f'{{"path": "file.txt", "content": "{long_content}"}}'
+        result = _truncate_tool_call_args_json(args, head_chars=200)
+        # Parse the result to verify it's valid JSON
+        import json
+        parsed = json.loads(result)
+        # The content should be truncated
+        assert len(parsed["content"]) == 200 + len("...[truncated]")
+        assert parsed["content"].endswith("...[truncated]")
+        # The path should be unchanged
+        assert parsed["path"] == "file.txt"
+
+    def test_nested_dict_truncated(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        import json
+        long_value = "x" * 500
+        args = json.dumps({"outer": {"inner": long_value}})
+        result = _truncate_tool_call_args_json(args, head_chars=100)
+        parsed = json.loads(result)
+        assert len(parsed["outer"]["inner"]) == 100 + len("...[truncated]")
+
+    def test_list_values_truncated(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        import json
+        args = json.dumps({"items": ["a" * 500, "short", "b" * 500]})
+        result = _truncate_tool_call_args_json(args, head_chars=100)
+        parsed = json.loads(result)
+        for item in parsed["items"]:
+            if len(item) > 100:
+                assert item.endswith("...[truncated]")
+
+    def test_non_string_values_preserved(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        import json
+        args = json.dumps({"count": 42, "enabled": True, "ratio": 3.14})
+        result = _truncate_tool_call_args_json(args, head_chars=200)
+        parsed = json.loads(result)
+        assert parsed["count"] == 42
+        assert parsed["enabled"] is True
+        assert parsed["ratio"] == 3.14
+
+    def test_invalid_json_returns_unchanged(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        # Invalid JSON should be returned unchanged
+        invalid = '{"path": "file.txt", "content": "unterminated'
+        result = _truncate_tool_call_args_json(invalid, head_chars=200)
+        assert result == invalid
+
+    def test_cjk_preserved(self):
+        from agent.context_compressor import _truncate_tool_call_args_json
+        import json
+        args = json.dumps({"message": "中文测试内容 " + "x" * 500})
+        result = _truncate_tool_call_args_json(args, head_chars=100)
+        parsed = json.loads(result)
+        # CJK characters should be preserved, not escaped as \uXXXX
+        assert "中文" in parsed["message"]
+        assert "...[truncated]" in parsed["message"]
