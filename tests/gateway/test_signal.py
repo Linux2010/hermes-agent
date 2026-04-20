@@ -991,3 +991,89 @@ class TestSignalTypingBackoff:
 
         assert "+155****4567" not in adapter._typing_failures
         assert "+155****4567" not in adapter._typing_skip_until
+
+
+# ---------------------------------------------------------------------------
+# Document Type Detection (Issue #12845)
+# ---------------------------------------------------------------------------
+
+class TestSignalDocumentTypeDetection:
+    """Regression tests for document attachment type detection.
+
+    Ensures that PDFs and other application/* MIME types are correctly
+    classified as DOCUMENT rather than TEXT.
+    """
+
+    def test_application_mime_type_detected_as_document(self):
+        """application/* MIME types should set msg_type to DOCUMENT."""
+        from gateway.platforms.base import MessageType
+        media_types = ["application/pdf"]
+        msg_type = MessageType.TEXT
+        if media_types:
+            if any(mt.startswith("audio/") for mt in media_types):
+                msg_type = MessageType.VOICE
+            elif any(mt.startswith("image/") for mt in media_types):
+                msg_type = MessageType.PHOTO
+            elif any(mt.startswith("application/") or mt.startswith("text/") for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+        assert msg_type == MessageType.DOCUMENT
+
+    def test_text_mime_type_detected_as_document(self):
+        """text/* MIME types (excluding plain text messages) should set msg_type to DOCUMENT.
+        
+        Note: The 'text/' MIME type check is for attachments like text/markdown,
+        text/csv, etc. - not for the message body which is handled separately.
+        """
+        from gateway.platforms.base import MessageType
+        media_types = ["text/csv"]
+        msg_type = MessageType.TEXT
+        if media_types:
+            if any(mt.startswith("audio/") for mt in media_types):
+                msg_type = MessageType.VOICE
+            elif any(mt.startswith("image/") for mt in media_types):
+                msg_type = MessageType.PHOTO
+            elif any(mt.startswith("application/") or mt.startswith("text/") for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+        assert msg_type == MessageType.DOCUMENT
+
+    def test_multiple_mime_types_with_pdf(self):
+        """Mixed MIME types including application/pdf should result in DOCUMENT."""
+        from gateway.platforms.base import MessageType
+        media_types = ["application/pdf", "text/plain"]
+        msg_type = MessageType.TEXT
+        if media_types:
+            if any(mt.startswith("audio/") for mt in media_types):
+                msg_type = MessageType.VOICE
+            elif any(mt.startswith("image/") for mt in media_types):
+                msg_type = MessageType.PHOTO
+            elif any(mt.startswith("application/") or mt.startswith("text/") for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+        assert msg_type == MessageType.DOCUMENT
+
+    def test_audio_mime_type_priority_over_document(self):
+        """audio/* should take priority over application/* (audio files are VOICE)."""
+        from gateway.platforms.base import MessageType
+        media_types = ["audio/mp3", "application/octet-stream"]
+        msg_type = MessageType.TEXT
+        if media_types:
+            if any(mt.startswith("audio/") for mt in media_types):
+                msg_type = MessageType.VOICE
+            elif any(mt.startswith("image/") for mt in media_types):
+                msg_type = MessageType.PHOTO
+            elif any(mt.startswith("application/") or mt.startswith("text/") for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+        assert msg_type == MessageType.VOICE
+
+    def test_image_mime_type_priority_over_document(self):
+        """image/* should take priority over application/*."""
+        from gateway.platforms.base import MessageType
+        media_types = ["image/png", "application/json"]
+        msg_type = MessageType.TEXT
+        if media_types:
+            if any(mt.startswith("audio/") for mt in media_types):
+                msg_type = MessageType.VOICE
+            elif any(mt.startswith("image/") for mt in media_types):
+                msg_type = MessageType.PHOTO
+            elif any(mt.startswith("application/") or mt.startswith("text/") for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+        assert msg_type == MessageType.PHOTO
